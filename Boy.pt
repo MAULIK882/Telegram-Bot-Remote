@@ -1,0 +1,369 @@
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+from telegram import KeyboardButton, ReplyKeyboardMarkup
+from mss import mss
+import tempfile
+import os
+import psutil
+import ctypes
+import webbrowser
+import pyperclip
+import subprocess
+import json
+import platform
+import time
+import sys
+
+def split_message(text, limit=4096):
+    return [text[i:i+limit] for i in range(0, len(text), limit)]
+
+class TelegramBot:
+    def __init__(self):
+        with open('auth.json') as f:
+            auth = json.load(f)
+        self.TOKEN = auth["TOKEN"]
+        self.CHAT_ID = auth["CHAT_ID"]
+        self.current_directory = None
+        self.kill_process_waiting = False
+        self.cmd_mode = False
+        self.navigation_active = False
+        self.navigation_history = []
+        self.download_file_waiting = False
+        self.url_input_waiting = False
+
+    def log_command(self, command, response):
+        print(f"[BOT RECEIVED] {command}")
+        print(f"[BOT RESPONSE] {response}")
+
+    def start_command(self, update, context):
+        buttons = [
+            [KeyboardButton("⚠ Screen status"), KeyboardButton("🔒 Lock screen")],
+            [KeyboardButton("📸 Take screenshot"), KeyboardButton("✂ Paste clipboard")],
+            [KeyboardButton("📄 List process"), KeyboardButton("💤 Sleep")],
+            [KeyboardButton("🔄 Restart"), KeyboardButton("⏻ Shutdown")],
+            [KeyboardButton("🌍 Open URL"), KeyboardButton("❌ Kill Process")],
+            [KeyboardButton("ℹ System Info"), KeyboardButton("🗂 Change Directory")],
+            [KeyboardButton("📥 Download File"), KeyboardButton("💻 Run Command")],
+            [KeyboardButton("💡 More Commands")]
+        ]
+        context.bot.send_message(
+            chat_id=self.CHAT_ID,
+            text="I will do what you command.",
+            reply_markup=ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+        )
+
+    def error(self, update, context):
+        print(f"Update {update} caused error {context.error}")
+
+    def take_screenshot(self):
+        TEMPDIR = tempfile.gettempdir()
+        os.chdir(TEMPDIR)
+        with mss() as sct:
+            sct.shot(mon=-1)
+        return os.path.join(TEMPDIR, 'monitor-0.png')
+
+    def handle_message(self, update, input_text):
+        usr_msg = input_text.split()
+
+        # Handle command mode
+        if input_text == "💻 Run Command":
+            self.cmd_mode = True
+            response = "Command mode activated. Enter commands or type 'exit' to exit command mode."
+            self.log_command(input_text, response)
+            return response
+            
+        if self.cmd_mode:
+            if input_text.lower() == "exit":
+                self.cmd_mode = False
+                return "Exited command mode."
+            
+            try:
+                if platform.system() == "Windows":
+                    result = subprocess.run(["cmd", "/c", input_text], capture_output=True, text=True, shell=True)
+                else:
+                    result = subprocess.run(input_text, capture_output=True, text=True, shell=True)
+                
+                output = result.stdout
+                if result.stderr:
+                    output += "\n\nErrors:\n" + result.stderr
+                
+                response = split_message(output) if output else ["Command executed with no output."]
+                self.log_command(input_text, response)
+                return response
+            except Exception as e:
+                response = f"Error executing command: {str(e)}"
+                self.log_command(input_text, response)
+                return response
+
+        # Handle URL input waiting
+        if self.url_input_waiting:
+            self.url_input_waiting = False
+            url = input_text
+            if url:
+                try:
+                    if sys.platform.startswith("win"):
+                        result = subprocess.run(["cmd", "/c", "start", url], shell=True, check=True, capture_output=True, text=True)
+                    elif sys.platform.startswith("linux"):
+                        result = subprocess.run(["xdg-open", url], check=True, capture_output=True, text=True)
+                    elif sys.platform.startswith("darwin"):
+                        result = subprocess.run(["open", url], check=True, capture_output=True, text=True)
+                    else:
+                        webbrowser.open(url)
+                    response = "✅ URL opened successfully."
+                except subprocess.CalledProcessError as e:
+                    response = f"❌ Failed to open URL: {e.stderr}"
+                    print(f"Error opening URL: {e.stderr}")
+                except Exception as e:
+                    response = f"❌ Failed to open URL: {e}"
+                    print(f"Error opening URL: {e}")
+            else:
+                response = "❌ No URL provided."
+            self.log_command("Open URL " + url, response)
+            return response
+
+        # Handle download file waiting
+        if self.download_file_waiting:
+            self.download_file_waiting = False
+            file_path = input_text
+            try:
+                if os.path.exists(file_path) and os.path.isfile(file_path):
+                    update.message.bot.send_document(self.CHAT_ID, open(file_path, 'rb'))
+                    response = f"File {file_path} sent successfully."
+                else:
+                    response = f"File {file_path} not found."
+            except Exception as e:
+                response = f"Error sending file: {str(e)}"
+            self.log_command("Download file " + file_path, response)
+            return response
+
+        if input_text == "💡 More Commands":
+            response = "Available commands:\n- url <link>: Open a URL\n- kill <proc>: Terminate a process\n- cmd <command>: Execute shell command\n- cd <dir>: Change directory\n- download <file>: Download a file"
+            self.log_command(input_text, response)
+            return response
+
+        if input_text == "ℹ System Info":
+            try:
+                cpu_usage = psutil.cpu_percent(interval=1)
+                ram_usage = psutil.virtual_memory().percent
+                uptime = time.time() - psutil.boot_time()
+                uptime_str = f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m"
+                response = f"🖥 System Info:\nCPU Usage: {cpu_usage}%\nRAM Usage: {ram_usage}%\nUptime: {uptime_str}"
+            except Exception as e:
+                response = f"Error retrieving system info: {str(e)}"
+            self.log_command(input_text, response)
+            return response
+        
+        if input_text == "🔄 Restart":
+            try:
+                response = "Restarting the system..."
+                self.log_command(input_text, response)
+                os.system("shutdown /r /t 30")  # Windows restart command
+            except Exception as e:
+                response = f"Error restarting system: {str(e)}"
+            self.log_command(input_text, response)
+            return response
+
+        if input_text == "⏻ Shutdown":
+            try:
+                response = "Shutting down the system..."
+                self.log_command(input_text, response)
+                os.system("shutdown /s /t 30 /f")  # Ensures a full shutdown (bypassing Fast Startup)
+            except Exception as e:
+                response = f"Error shutting down system: {str(e)}"
+            self.log_command(input_text, response)
+            return response
+
+        if input_text == '🔒 Lock screen':
+            try:
+                ctypes.windll.user32.LockWorkStation()
+                return "Screen locked successfully"
+            except:
+                return "Error while locking screen"
+
+        if input_text == "💤 Sleep":
+            try:
+                os.system("rundll32.exe powrprof.dll,SetSuspendState 0,1,0")
+                return "Windows was put to sleep"
+            except:
+                return "Cannot put Windows to sleep"
+
+        if input_text == "✂ Paste clipboard":
+            clipboard_text = pyperclip.paste()
+            response = split_message(clipboard_text)
+            self.log_command(input_text, response)
+            return response
+
+        if input_text == "📄 List process":
+            try:
+                proc_list = [proc.name() for proc in psutil.process_iter()]
+                response = split_message("\n".join(proc_list))
+            except:
+                response = "Error retrieving process list."
+            self.log_command(input_text, response)
+            return response
+        
+        if input_text == "❌ Kill Process":
+            self.kill_process_waiting = True
+            return "Please enter the PID or name of the process to kill:"
+
+        if self.kill_process_waiting:
+            self.kill_process_waiting = False
+            try:
+                process_id_or_name = input_text
+                if process_id_or_name.isdigit():
+                    pid = int(process_id_or_name)
+                    process = psutil.Process(pid)
+                    process.kill()
+                    response = f"Successfully killed process with PID {pid}."
+                else:
+                    killed_processes = []
+                    for proc in psutil.process_iter(['pid', 'name']):
+                        if proc.info['name'].lower() == process_id_or_name.lower():
+                            p = psutil.Process(proc.info['pid'])
+                            p.kill()
+                            killed_processes.append(proc.info['pid'])
+                    if killed_processes:
+                       response = f"Successfully killed processes with PIDs {killed_processes}."
+                    else:
+                       response = f"No processes found with name '{process_id_or_name}'."
+            except psutil.NoSuchProcess:
+                response = "Process not found."
+            except psutil.AccessDenied:
+                response = "Access denied. Run the bot as administrator."
+            except Exception as e:
+                response = f"Error killing process: {str(e)}"
+                print(f"Error killing process: {e}")
+
+            self.log_command("kill " + input_text, response)
+            return response
+
+        if input_text == "⚠ Screen status":
+            try:
+                is_locked = ctypes.windll.user32.GetForegroundWindow() == 0
+                response = "Screen is locked." if is_locked else "Screen is active."
+            except:
+                response = "Error retrieving screen status."
+            self.log_command(input_text, response)
+            return response
+
+        if input_text == "📸 Take screenshot":
+            try:
+                screenshot_path = self.take_screenshot()
+                update.message.bot.send_photo(self.CHAT_ID, open(screenshot_path, 'rb'))
+                response = "Screenshot taken and sent."
+            except:
+                response = "Error taking screenshot."
+            self.log_command(input_text, response)
+            return response
+        
+        if input_text == "🌍 Open URL":
+            self.url_input_waiting = True
+            response = "Please send the URL to open."
+            self.log_command(input_text, response)
+            return response
+
+        if input_text == "🌍 Open URL":
+            self.url_input_waiting = True
+            response = "Please send the URL to open."
+            self.log_command(input_text, response)
+            return response
+
+        if input_text.startswith("🌍 Open URL "):
+            url = input_text.replace("🌍 Open URL ", "").strip()
+            if url:
+                response = self.open_url(url)
+            else:
+                response = "❌ No URL provided."
+            self.log_command(input_text, response)
+            return response
+
+        if input_text == "📥 Download File":
+            self.download_file_waiting = True
+            response = "Please enter the full path of the file to download:"
+            self.log_command(input_text, response)
+            return response
+
+        if input_text == "🗂 Change Directory":
+            self.navigation_active = True
+            self.navigation_history = [] #reset history
+            drives = [f"{i+1}. {d}:\\" for i, d in enumerate("CDEFGHIJKLMNOPQRSTUVWXYZ") if os.path.exists(d + ":\\")]
+            response = "Select a drive by number:\n" + "\n".join(drives)
+            self.log_command(input_text, response)
+            return response
+
+        if self.navigation_active:
+            if input_text == "/exit":
+                self.navigation_active = False
+                self.navigation_history = []
+                return "Directory navigation exited."
+
+            if input_text.isdigit():
+                if not self.navigation_history: #if history is empty, it means drive selection.
+                    drives = [d + ":\\" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(d + ":\\")]
+                    index = int(input_text) - 1
+                    if 0 <= index < len(drives):
+                        self.current_directory = drives[index]
+                        self.navigation_history.append(self.current_directory)
+                        return self.list_directory_contents(update)
+                    else:
+                        return "Invalid drive selection."
+                else: #if history is not empty, it means folder selection.
+                    contents = os.listdir(self.current_directory)
+                    if input_text == "0" and len(self.navigation_history)>1:
+                        self.navigation_history.pop()
+                        self.current_directory = self.navigation_history[-1]
+                        return self.list_directory_contents(update)
+
+                    try:
+                        index = int(input_text) -1
+                        selected_item = contents[index]
+                        path = os.path.join(self.current_directory, selected_item)
+                        if os.path.isdir(path):
+                            self.current_directory = path
+                            self.navigation_history.append(self.current_directory)
+                            return self.list_directory_contents(update)
+                        elif os.path.isfile(path):
+                            update.message.bot.send_document(self.CHAT_ID, open(path, 'rb'))
+                            return "File sent successfully."
+                        else:
+                            return "Invalid selection."
+                    except (ValueError, IndexError):
+                        return "Invalid selection."
+            else:
+                return "Please enter a number."
+        else:
+            return "Use '🗂 Change Directory' to start navigation."
+
+    def list_directory_contents(self, update):
+        contents = os.listdir(self.current_directory)
+        numbered_contents = [f"{i+1}. {item}" for i, item in enumerate(contents)]
+        if len(self.navigation_history) > 1:
+            numbered_contents.insert(0, "0. .. (Parent Directory)")
+        response = f"Current Directory: {self.current_directory}\n\nContents:\n" + "\n".join(numbered_contents)
+        self.log_command("List contents", response)
+        return response
+
+    def send_response(self, update, context):
+        user_message = update.message.text.strip()
+        if update.message.chat["username"] != "Smarty_Trader":
+            context.bot.send_message(chat_id=self.CHAT_ID, text="Nothing to see here.")
+        else:
+            response = self.handle_message(update, user_message)
+            if response:
+                if isinstance(response, list):
+                    for part in response:
+                        context.bot.send_message(chat_id=self.CHAT_ID, text=part)
+                else:
+                    context.bot.send_message(chat_id=self.CHAT_ID, text=response)
+
+    def start_bot(self):
+        updater = Updater(self.TOKEN, use_context=True)
+        dp = updater.dispatcher
+        dp.add_handler(CommandHandler("start", self.start_command))
+        dp.add_handler(MessageHandler(Filters.text, self.send_response))
+        dp.add_error_handler(self.error)
+        updater.start_polling()
+        print("[+] BOT has started")
+        updater.idle()
+
+bot = TelegramBot()
+bot.start_bot()
