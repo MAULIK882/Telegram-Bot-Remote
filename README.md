@@ -42,8 +42,8 @@ cd telegram-bot-remote
 ```
 ### 2️⃣ Create and Activate Virtual Environment
 ```bash
-python -m venv venv  # Create virtual environment  
-venv\Scripts\activate  # Activate venv (Windows)  
+python -m venv venv
+venv\Scripts\activate
 ```
 ### 3️⃣ Install Dependencies
 ```bash
